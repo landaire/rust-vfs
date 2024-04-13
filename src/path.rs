@@ -3,7 +3,9 @@
 //! The virtual file system abstraction generalizes over file systems and allow using
 //! different VirtualFileSystem implementations (i.e. an in memory implementation for unit tests)
 
+use std::borrow::Cow;
 use std::io::{Read, Seek, Write};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -115,38 +117,36 @@ struct VFS {
 
 /// A virtual filesystem path, identifying a single file or directory in this virtual filesystem
 #[derive(Clone, Debug)]
-pub struct VfsPath {
+pub struct VfsPathWithRef<'fs> {
     path: Arc<str>,
-    fs: Arc<VFS>,
+    fs: &'fs dyn FileSystem,
 }
 
-impl PathLike for VfsPath {
+impl PathLike for VfsPathWithRef<'_> {
     fn get_path(&self) -> String {
         self.path.to_string()
     }
 }
 
-impl PartialEq for VfsPath {
+impl PartialEq for VfsPathWithRef<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.path == other.path && Arc::ptr_eq(&self.fs, &other.fs)
+        self.path == other.path && std::ptr::addr_eq(&self.fs, &other.fs)
     }
 }
 
-impl Eq for VfsPath {}
+impl Eq for VfsPathWithRef<'_> {}
 
-impl VfsPath {
+impl<'fs> VfsPathWithRef<'fs> {
     /// Creates a root path for the given filesystem
     ///
     /// ```
     /// # use vfs::{PhysicalFS, VfsPath};
     /// let path = VfsPath::new(PhysicalFS::new("."));
     /// ````
-    pub fn new<T: FileSystem>(filesystem: T) -> Self {
-        VfsPath {
+    pub fn new(filesystem: &'fs dyn FileSystem) -> Self {
+        Self {
             path: "".into(),
-            fs: Arc::new(VFS {
-                fs: Box::new(filesystem),
-            }),
+            fs: filesystem,
         }
     }
 
@@ -197,8 +197,8 @@ impl VfsPath {
     /// assert_eq!(directory.root(), path);
     /// # Ok::<(), VfsError>(())
     /// ```
-    pub fn root(&self) -> VfsPath {
-        VfsPath {
+    pub fn root(&self) -> Self {
+        Self {
             path: "".into(),
             fs: self.fs.clone(),
         }
@@ -238,7 +238,7 @@ impl VfsPath {
     /// ```
     pub fn create_dir(&self) -> VfsResult<()> {
         self.get_parent("create directory")?;
-        self.fs.fs.create_dir(&self.path).map_err(|err| {
+        self.fs.create_dir(&self.path).map_err(|err| {
             err.with_path(&*self.path)
                 .with_context(|| "Could not create directory")
         })
@@ -274,7 +274,7 @@ impl VfsPath {
                 .map(|it| it + pos)
                 .unwrap_or_else(|| path.len());
             let directory = &path[..end];
-            if let Err(error) = self.fs.fs.create_dir(directory) {
+            if let Err(error) = self.fs.create_dir(directory) {
                 match error.kind() {
                     VfsErrorKind::DirectoryExists => {}
                     _ => {
@@ -306,22 +306,20 @@ impl VfsPath {
     /// assert_eq!(directories, vec![path.join("bar")?, path.join("foo")?]);
     /// # Ok::<(), VfsError>(())
     /// ```
-    pub fn read_dir(&self) -> VfsResult<Box<dyn Iterator<Item = VfsPath> + Send>> {
+    pub fn read_dir(&self) -> VfsResult<impl Iterator<Item = Self> + Send> {
         let parent = self.path.clone();
         let fs = self.fs.clone();
-        Ok(Box::new(
-            self.fs
-                .fs
-                .read_dir(&self.path)
-                .map_err(|err| {
-                    err.with_path(&*self.path)
-                        .with_context(|| "Could not read directory")
-                })?
-                .map(move |path| VfsPath {
-                    path: format!("{}/{}", parent, path).into(),
-                    fs: fs.clone(),
-                }),
-        ))
+        Ok(self
+            .fs
+            .read_dir(&self.path)
+            .map_err(|err| {
+                err.with_path(&*self.path)
+                    .with_context(|| "Could not read directory")
+            })?
+            .map(move |path| Self {
+                path: format!("{}/{}", parent, path).into(),
+                fs: fs.clone(),
+            }))
     }
 
     /// Creates a file at this path for writing, overwriting any existing file
@@ -341,7 +339,7 @@ impl VfsPath {
     /// ```
     pub fn create_file(&self) -> VfsResult<Box<dyn SeekAndWrite + Send>> {
         self.get_parent("create file")?;
-        self.fs.fs.create_file(&self.path).map_err(|err| {
+        self.fs.create_file(&self.path).map_err(|err| {
             err.with_path(&*self.path)
                 .with_context(|| "Could not create file")
         })
@@ -363,7 +361,7 @@ impl VfsPath {
     /// # Ok::<(), VfsError>(())
     /// ```
     pub fn open_file(&self) -> VfsResult<Box<dyn SeekAndRead + Send>> {
-        self.fs.fs.open_file(&self.path).map_err(|err| {
+        self.fs.open_file(&self.path).map_err(|err| {
             err.with_path(&*self.path)
                 .with_context(|| "Could not open file")
         })
@@ -405,7 +403,7 @@ impl VfsPath {
     /// # Ok::<(), VfsError>(())
     /// ```
     pub fn append_file(&self) -> VfsResult<Box<dyn SeekAndWrite + Send>> {
-        self.fs.fs.append_file(&self.path).map_err(|err| {
+        self.fs.append_file(&self.path).map_err(|err| {
             err.with_path(&*self.path)
                 .with_context(|| "Could not open file for appending")
         })
@@ -427,7 +425,7 @@ impl VfsPath {
     /// # Ok::<(), VfsError>(())
     /// ```
     pub fn remove_file(&self) -> VfsResult<()> {
-        self.fs.fs.remove_file(&self.path).map_err(|err| {
+        self.fs.remove_file(&self.path).map_err(|err| {
             err.with_path(&*self.path)
                 .with_context(|| "Could not remove file")
         })
@@ -451,7 +449,7 @@ impl VfsPath {
     /// # Ok::<(), VfsError>(())
     /// ```
     pub fn remove_dir(&self) -> VfsResult<()> {
-        self.fs.fs.remove_dir(&self.path).map_err(|err| {
+        self.fs.remove_dir(&self.path).map_err(|err| {
             err.with_path(&*self.path)
                 .with_context(|| "Could not remove directory")
         })
@@ -508,7 +506,7 @@ impl VfsPath {
     /// assert_eq!(file.metadata()?.file_type, VfsFileType::File);
     /// # Ok::<(), VfsError>(())
     pub fn metadata(&self) -> VfsResult<VfsMetadata> {
-        self.fs.fs.metadata(&self.path).map_err(|err| {
+        self.fs.metadata(&self.path).map_err(|err| {
             err.with_path(&*self.path)
                 .with_context(|| "Could not get metadata")
         })
@@ -532,13 +530,10 @@ impl VfsPath {
     ///
     /// # Ok::<(), VfsError>(())
     pub fn set_creation_time(&self, time: SystemTime) -> VfsResult<()> {
-        self.fs
-            .fs
-            .set_creation_time(&self.path, time)
-            .map_err(|err| {
-                err.with_path(&*self.path)
-                    .with_context(|| "Could not set creation timestamp.")
-            })
+        self.fs.set_creation_time(&self.path, time).map_err(|err| {
+            err.with_path(&*self.path)
+                .with_context(|| "Could not set creation timestamp.")
+        })
     }
 
     /// Sets the files modification timestamp at this path
@@ -560,7 +555,6 @@ impl VfsPath {
     /// # Ok::<(), VfsError>(())
     pub fn set_modification_time(&self, time: SystemTime) -> VfsResult<()> {
         self.fs
-            .fs
             .set_modification_time(&self.path, time)
             .map_err(|err| {
                 err.with_path(&*self.path)
@@ -586,7 +580,7 @@ impl VfsPath {
     ///
     /// # Ok::<(), VfsError>(())
     pub fn set_access_time(&self, time: SystemTime) -> VfsResult<()> {
-        self.fs.fs.set_access_time(&self.path, time).map_err(|err| {
+        self.fs.set_access_time(&self.path, time).map_err(|err| {
             err.with_path(&*self.path)
                 .with_context(|| "Could not set access timestamp.")
         })
@@ -655,7 +649,7 @@ impl VfsPath {
     /// assert!(directory.exists()?);
     /// # Ok::<(), VfsError>(())
     pub fn exists(&self) -> VfsResult<bool> {
-        self.fs.fs.exists(&self.path)
+        self.fs.exists(&self.path)
     }
 
     /// Returns the filename portion of this path
@@ -736,7 +730,7 @@ impl VfsPath {
     /// ```
     pub fn walk_dir(&self) -> VfsResult<WalkDirIterator> {
         Ok(WalkDirIterator {
-            inner: Box::new(self.read_dir()?),
+            inner: self.read_dir()?.collect::<Vec<_>>().into_iter(),
             todo: vec![],
         })
     }
@@ -794,7 +788,7 @@ impl VfsPath {
     /// assert_eq!(dest.read_to_string()?, "Hello, world!");
     /// # Ok::<(), VfsError>(())
     /// ```
-    pub fn copy_file(&self, destination: &VfsPath) -> VfsResult<()> {
+    pub fn copy_file(&self, destination: &Self) -> VfsResult<()> {
         || -> VfsResult<()> {
             if destination.exists()? {
                 return Err(VfsError::from(VfsErrorKind::Other(
@@ -802,8 +796,8 @@ impl VfsPath {
                 ))
                 .with_path(&*self.path));
             }
-            if Arc::ptr_eq(&self.fs, &destination.fs) {
-                let result = self.fs.fs.copy_file(&self.path, &destination.path);
+            if std::ptr::addr_eq(self.fs, destination.fs) {
+                let result = self.fs.copy_file(&self.path, &destination.path);
                 match result {
                     Err(err) => match err.kind() {
                         VfsErrorKind::NotSupported => {
@@ -853,7 +847,7 @@ impl VfsPath {
     /// assert!(!src.exists()?);
     /// # Ok::<(), VfsError>(())
     /// ```
-    pub fn move_file(&self, destination: &VfsPath) -> VfsResult<()> {
+    pub fn move_file(&self, destination: &Self) -> VfsResult<()> {
         || -> VfsResult<()> {
             if destination.exists()? {
                 return Err(VfsError::from(VfsErrorKind::Other(
@@ -861,8 +855,8 @@ impl VfsPath {
                 ))
                 .with_path(&*destination.path));
             }
-            if Arc::ptr_eq(&self.fs, &destination.fs) {
-                let result = self.fs.fs.move_file(&self.path, &destination.path);
+            if std::ptr::addr_eq(self.fs, destination.fs) {
+                let result = self.fs.move_file(&self.path, &destination.path);
                 match result {
                     Err(err) => match err.kind() {
                         VfsErrorKind::NotSupported => {
@@ -914,7 +908,7 @@ impl VfsPath {
     /// assert!(dest.join("dir")?.exists()?);
     /// # Ok::<(), VfsError>(())
     /// ```
-    pub fn copy_dir(&self, destination: &VfsPath) -> VfsResult<u64> {
+    pub fn copy_dir<'a>(&'fs self, destination: &VfsPathWithRef<'a>) -> VfsResult<u64> {
         let mut files_copied = 0u64;
         || -> VfsResult<()> {
             if destination.exists()? {
@@ -927,7 +921,7 @@ impl VfsPath {
             let prefix = &*self.path;
             let prefix_len = prefix.len();
             for file in self.walk_dir()? {
-                let src_path: VfsPath = file?;
+                let src_path: Self = file?;
                 let dest_path = destination.join(&src_path.as_str()[prefix_len + 1..])?;
                 match src_path.metadata()?.file_type {
                     VfsFileType::Directory => dest_path.create_dir()?,
@@ -967,7 +961,7 @@ impl VfsPath {
     /// assert!(!src.join("dir")?.exists()?);
     /// # Ok::<(), VfsError>(())
     /// ```
-    pub fn move_dir(&self, destination: &VfsPath) -> VfsResult<()> {
+    pub fn move_dir<'a>(&'fs self, destination: &'a Self) -> VfsResult<()> {
         || -> VfsResult<()> {
             if destination.exists()? {
                 return Err(VfsError::from(VfsErrorKind::Other(
@@ -975,8 +969,8 @@ impl VfsPath {
                 ))
                 .with_path(&*destination.path));
             }
-            if Arc::ptr_eq(&self.fs, &destination.fs) {
-                let result = self.fs.fs.move_dir(&self.path, &destination.path);
+            if std::ptr::addr_eq(self.fs, destination.fs) {
+                let result = self.fs.move_dir(&self.path, &destination.path);
                 match result {
                     Err(err) => match err.kind() {
                         VfsErrorKind::NotSupported => {
@@ -991,7 +985,7 @@ impl VfsPath {
             let prefix = &*self.path;
             let prefix_len = prefix.len();
             for file in self.walk_dir()? {
-                let src_path: VfsPath = file?;
+                let src_path: Self = file?;
                 let dest_path = destination.join(&src_path.as_str()[prefix_len + 1..])?;
                 match src_path.metadata()?.file_type {
                     VfsFileType::Directory => dest_path.create_dir()?,
@@ -1015,22 +1009,22 @@ impl VfsPath {
 }
 
 /// An iterator for recursively walking a file hierarchy
-pub struct WalkDirIterator {
+pub struct WalkDirIterator<'fs> {
     /// the path iterator of the current directory
-    inner: Box<dyn Iterator<Item = VfsPath> + Send>,
+    inner: std::vec::IntoIter<VfsPathWithRef<'fs>>,
     /// stack of subdirectories still to walk
-    todo: Vec<VfsPath>,
+    todo: Vec<VfsPathWithRef<'fs>>,
 }
 
-impl std::fmt::Debug for WalkDirIterator {
+impl std::fmt::Debug for WalkDirIterator<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("WalkDirIterator")?;
         self.todo.fmt(f)
     }
 }
 
-impl Iterator for WalkDirIterator {
-    type Item = VfsResult<VfsPath>;
+impl<'fs> Iterator for WalkDirIterator<'fs> {
+    type Item = VfsResult<VfsPathWithRef<'fs>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let result = loop {
@@ -1040,7 +1034,7 @@ impl Iterator for WalkDirIterator {
                     match self.todo.pop() {
                         None => return None, // all done!
                         Some(directory) => match directory.read_dir() {
-                            Ok(iterator) => self.inner = iterator,
+                            Ok(iterator) => self.inner = iterator.collect::<Vec<_>>().into_iter(),
                             Err(err) => break Some(Err(err)),
                         },
                     }

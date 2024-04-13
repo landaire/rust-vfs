@@ -58,7 +58,7 @@ pub mod test_macros;
 
 pub mod error;
 pub mod filesystem;
-pub mod impls;
+// pub mod impls;
 pub mod path;
 
 #[cfg(feature = "async-vfs")]
@@ -66,10 +66,11 @@ pub mod async_vfs;
 
 pub use error::{VfsError, VfsResult};
 pub use filesystem::FileSystem;
-pub use impls::altroot::AltrootFS;
-#[cfg(feature = "embedded-fs")]
-pub use impls::embedded::EmbeddedFS;
-pub use impls::memory::MemoryFS;
-pub use impls::overlay::OverlayFS;
-pub use impls::physical::PhysicalFS;
+// pub use impls::altroot::AltrootFS;
+// #[cfg(feature = "embedded-fs")]
+// pub use impls::embedded::EmbeddedFS;
+// pub use impls::memory::MemoryFS;
+// pub use impls::overlay::OverlayFS;
+// pub use impls::physical::PhysicalFS;
 pub use path::*;
+pub type VfsPath = VfsPathWithRef<'static>;

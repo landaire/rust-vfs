@@ -1,7 +1,7 @@
 //! The filesystem trait definitions needed to implement new virtual filesystems
 
 use crate::error::VfsErrorKind;
-use crate::{SeekAndRead, SeekAndWrite, VfsError, VfsMetadata, VfsPath, VfsResult};
+use crate::{SeekAndRead, SeekAndWrite, VfsError, VfsMetadata, VfsPath, VfsPathWithRef, VfsResult};
 use std::fmt::Debug;
 use std::time::SystemTime;
 
@@ -12,7 +12,7 @@ use std::time::SystemTime;
 /// Path components may be any UTF-8 string, except "/", "." and ".."
 ///
 /// Please use the test_macros [test_macros::test_vfs!] and [test_macros::test_vfs_readonly!]
-pub trait FileSystem: Debug + Sync + Send + 'static {
+pub trait FileSystem: Debug + Sync + Send {
     /// Iterates over all direct children of this directory path
     /// NOTE: the returned String items denote the local bare filenames, i.e. they should not contain "/" anywhere
     fn read_dir(&self, path: &str) -> VfsResult<Box<dyn Iterator<Item = String> + Send>>;
@@ -60,8 +60,8 @@ pub trait FileSystem: Debug + Sync + Send + 'static {
     }
 }
 
-impl<T: FileSystem> From<T> for VfsPath {
-    fn from(filesystem: T) -> Self {
-        VfsPath::new(filesystem)
+impl<'fs, T: FileSystem + 'fs> From<&'fs T> for VfsPathWithRef<'fs> {
+    fn from(filesystem: &'fs T) -> Self {
+        VfsPathWithRef::new(filesystem)
     }
 }
