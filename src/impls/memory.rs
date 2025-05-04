@@ -64,6 +64,15 @@ impl Seek for WritableFile {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn current_time() -> Option<SystemTime> {
+    Some(SystemTime::now())
+}
+#[cfg(target_arch = "wasm32")]
+fn current_time() -> Option<SystemTime> {
+    None
+}
+
 impl Write for WritableFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.content.write(buf)
@@ -81,8 +90,8 @@ impl Write for WritableFile {
             content: Arc::new(content),
             created: previous_file
                 .map(|file| file.created)
-                .unwrap_or(SystemTime::now()),
-            modified: Some(SystemTime::now()),
+                .unwrap_or_else(current_time),
+            modified: current_time(),
             accessed: previous_file.map(|file| file.accessed).unwrap_or(None),
         };
 
@@ -182,9 +191,9 @@ impl FileSystem for MemoryFS {
                     MemoryFile {
                         file_type: VfsFileType::Directory,
                         content: Default::default(),
-                        created: SystemTime::now(),
-                        modified: Some(SystemTime::now()),
-                        accessed: Some(SystemTime::now()),
+                        created: current_time(),
+                        modified: current_time(),
+                        accessed: current_time(),
                     },
                 );
             }
@@ -193,7 +202,9 @@ impl FileSystem for MemoryFS {
     }
 
     fn open_file(&self, path: &str) -> VfsResult<Box<dyn SeekAndRead + Send>> {
-        self.set_access_time(path, SystemTime::now())?;
+        if let Some(time) = current_time() {
+            self.set_access_time(path, time)?;
+        }
 
         let handle = self.handle.read().unwrap();
         let file = handle.files.get(path).ok_or(VfsErrorKind::FileNotFound)?;
@@ -212,9 +223,9 @@ impl FileSystem for MemoryFS {
             MemoryFile {
                 file_type: VfsFileType::File,
                 content,
-                created: SystemTime::now(),
-                modified: Some(SystemTime::now()),
-                accessed: Some(SystemTime::now()),
+                created: current_time(),
+                modified: current_time(),
+                accessed: current_time(),
             },
         );
         let writer = WritableFile {
@@ -246,7 +257,7 @@ impl FileSystem for MemoryFS {
             file_type: file.file_type,
             len: file.content.len() as u64,
             modified: file.modified,
-            created: Some(file.created),
+            created: file.created,
             accessed: file.accessed,
         })
     }
@@ -256,7 +267,7 @@ impl FileSystem for MemoryFS {
         let files = &mut guard.files;
         let file = files.get_mut(path).ok_or(VfsErrorKind::FileNotFound)?;
 
-        file.created = time;
+        file.created = Some(time);
 
         Ok(())
     }
@@ -320,7 +331,7 @@ impl MemoryFsImpl {
             MemoryFile {
                 file_type: VfsFileType::Directory,
                 content: Arc::new(vec![]),
-                created: SystemTime::now(),
+                created: current_time(),
                 modified: None,
                 accessed: None,
             },
@@ -334,7 +345,7 @@ struct MemoryFile {
     #[allow(clippy::rc_buffer)] // to allow accessing the same object as writable
     content: Arc<Vec<u8>>,
 
-    created: SystemTime,
+    created: Option<SystemTime>,
     modified: Option<SystemTime>,
     accessed: Option<SystemTime>,
 }

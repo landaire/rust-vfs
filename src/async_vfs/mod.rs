@@ -60,5 +60,6 @@ pub use filesystem::AsyncFileSystem;
 pub use impls::altroot::AsyncAltrootFS;
 pub use impls::memory::AsyncMemoryFS;
 pub use impls::overlay::AsyncOverlayFS;
+#[cfg(not(target_os = "unknown"))]
 pub use impls::physical::AsyncPhysicalFS;
 pub use path::*;
